@@ -2,45 +2,186 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="referrer" content="strict-origin-when-cross-origin">
-  <title>RokIPTV YouTube Relay</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>RokIPTV YouTube Zero-Trace Relay</title>
   <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    html,body{width:100%;height:100%;overflow:hidden;background:#000}
-    #player,iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0}
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #player-container, iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
   </style>
 </head>
 <body>
-  <div id="player"></div>
+  <div id="player-container"></div>
   <script>
-    (function(){
-      var p=new URLSearchParams(location.search),v=p.get('v')||'';
-      if(!v){document.body.innerHTML='<p style="color:#fff;text-align:center;margin-top:40vh;font-family:sans-serif">Nessun video</p>';return}
-      var s=document.createElement('script');
-      s.src='https://www.youtube.com/iframe_api';
-      s.onerror=fallback;
-      document.head.appendChild(s);
-      var t=setTimeout(function(){if(!window.YT||!window.YT.Player)fallback()},4000);
-      window.onYouTubeIframeAPIReady=function(){
-        clearTimeout(t);
-        new YT.Player('player',{
-          width:'100%',height:'100%',videoId:v,
-          host:'https://www.youtube-nocookie.com',
-          playerVars:{autoplay:1,controls:1,rel:0,playsinline:1,modestbranding:1,enablejsapi:1},
-          events:{
-            onReady:function(e){try{e.target.playVideo()}catch(x){}},
-            onError:function(e){if(e.data===150||e.data===101)return;fallback()}
+    (function() {
+      // 1. Azzeramento profondo e immediato di memorie/cache
+      try { localStorage.clear(); } catch (_) {}
+      try { sessionStorage.clear(); } catch (_) {}
+      try {
+        if (window.indexedDB && indexedDB.databases) {
+          indexedDB.databases().then(function(dbs) {
+            for (var i = 0; i < dbs.length; i++) {
+              if (dbs[i].name) indexedDB.deleteDatabase(dbs[i].name);
+            }
+          });
+        }
+      } catch (_) {}
+      try {
+        if (window.caches && caches.keys) {
+          caches.keys().then(function(keys) {
+            for (var i = 0; i < keys.length; i++) caches.delete(keys[i]);
+          });
+        }
+      } catch (_) {}
+      try {
+        var cookies = document.cookie.split(";");
+        for (var i = 0; i < cookies.length; i++) {
+          var eqPos = cookies[i].indexOf("=");
+          var name = eqPos > -1 ? cookies[i].substr(0, eqPos) : cookies[i];
+          document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/";
+        }
+      } catch (_) {}
+
+      var p = new URLSearchParams(location.search);
+      var v = p.get('v') || '';
+      var isAdActive = false;
+      var ytFrame = null;
+      var lastReportedTime = 0;
+      var trackDuration = 0;
+
+      function notifyParent(data) {
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage(JSON.stringify(data), '*');
           }
-        });
-      };
-      function fallback(){
-        document.getElementById('player').innerHTML=
-          '<iframe src="https://www.youtube-nocookie.com/embed/'+encodeURIComponent(v)+
-          '?autoplay=1&controls=1&rel=0&playsinline=1&modestbranding=1" '+
-          'allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture;web-share" '+
-          'referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>';
+        } catch (_) {}
       }
+
+      if (!v) {
+        document.body.innerHTML = '<p style="color:#fff;text-align:center;margin-top:40vh;font-family:sans-serif">Nessun video</p>';
+        return;
+      }
+
+      // 2. Creazione immediata iframe per avvio istantaneo dello stream audio (< 100ms)
+      var container = document.getElementById('player-container');
+      var iframe = document.createElement('iframe');
+      iframe.id = 'yt-embed-player';
+      iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+      iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+      iframe.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v) +
+        '?autoplay=1&enablejsapi=1&controls=0&rel=0&playsinline=1&modestbranding=1&iv_load_policy=3&fs=0&widgetid=1';
+      container.appendChild(iframe);
+      ytFrame = iframe;
+
+      function sendYtCmd(func, args) {
+        try {
+          if (ytFrame && ytFrame.contentWindow) {
+            ytFrame.contentWindow.postMessage(JSON.stringify({
+              event: 'command',
+              func: func,
+              args: args || []
+            }), '*');
+          }
+        } catch (_) {}
+      }
+
+      // Handshake continuo di ascolto eventi postMessage di YouTube
+      function handshakeListening() {
+        try {
+          if (ytFrame && ytFrame.contentWindow) {
+            ytFrame.contentWindow.postMessage(JSON.stringify({
+              event: 'listening',
+              id: 1,
+              channel: 'widget'
+            }), '*');
+          }
+        } catch (_) {}
+      }
+
+      var handshakeInterval = setInterval(handshakeListening, 200);
+      setTimeout(function() { clearInterval(handshakeInterval); }, 4000);
+
+      // 3. Smart Ad-Skipper ad alta frequenza (50ms)
+      function killAdsInstantly() {
+        try {
+          var video = document.querySelector('video');
+          var adModule = document.querySelector('.ad-showing, .video-ads, .ytp-ad-module, .ytp-ad-player-overlay, [class*="ytp-ad-"]');
+          var isYtAd = !!(adModule && adModule.children.length > 0);
+
+          if (video && isYtAd) {
+            if (!isAdActive) {
+              isAdActive = true;
+              notifyParent({ type: 'ad_state', isAd: true });
+            }
+            video.muted = true;
+            video.playbackRate = 16;
+            if (video.duration && isFinite(video.duration) && video.duration > 0) {
+              video.currentTime = video.duration;
+            }
+          } else if (isAdActive && video && !isYtAd) {
+            isAdActive = false;
+            video.muted = false;
+            video.playbackRate = 1;
+            sendYtCmd('unMute');
+            sendYtCmd('setVolume', [100]);
+            notifyParent({ type: 'ad_state', isAd: false });
+          }
+        } catch (_) {}
+      }
+      setInterval(killAdsInstantly, 50);
+
+      // Notifica iniziale di avvio riproduzione
+      notifyParent({ type: 'playing' });
+
+      // 4. Gestione bidirezionale messaggi
+      window.addEventListener('message', function(e) {
+        if (!e.data) return;
+        var msg = e.data;
+        if (typeof msg === 'string') {
+          try { msg = JSON.parse(msg); } catch (_) { return; }
+        }
+        if (typeof msg !== 'object') return;
+
+        // Comandi provenienti dalla dashboard del player
+        if (msg.event === 'command' && msg.func) {
+          sendYtCmd(msg.func, msg.args);
+          return;
+        }
+
+        // Risposte / eventi generati dall'iframe YouTube
+        if (msg.event === 'infoDelivery' && msg.info) {
+          var info = msg.info;
+          if (typeof info.duration === 'number' && info.duration > 0) {
+            trackDuration = info.duration;
+          }
+          if (typeof info.currentTime === 'number') {
+            lastReportedTime = info.currentTime;
+            notifyParent({ type: 'timeupdate', currentTime: lastReportedTime, duration: trackDuration });
+          }
+          if (typeof info.playerState !== 'undefined') {
+            if (info.playerState === 1) { // Playing
+              notifyParent({ type: 'playing', duration: trackDuration, currentTime: lastReportedTime });
+            } else if (info.playerState === 2) { // Paused
+              notifyParent({ type: 'paused' });
+            } else if (info.playerState === 0) { // Ended
+              notifyParent({ type: 'ended' });
+            }
+          }
+        } else if (msg.event === 'onStateChange') {
+          if (msg.info === 1) notifyParent({ type: 'playing', duration: trackDuration });
+          else if (msg.info === 2) notifyParent({ type: 'paused' });
+          else if (msg.info === 0) notifyParent({ type: 'ended' });
+        } else if (msg.event === 'initialDelivery') {
+          sendYtCmd('unMute');
+          sendYtCmd('setVolume', [100]);
+          sendYtCmd('playVideo');
+          notifyParent({ type: 'playing' });
+        }
+      });
     })();
   </script>
 </body>
